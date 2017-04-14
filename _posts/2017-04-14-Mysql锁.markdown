@@ -1,6 +1,10 @@
 ---
 layout: post
 title: Mysql锁问题
+tags:
+- Mysql锁
+- MyISAM
+- InnoDB
 date: 2017-04-14 12:00:00.000000000 +09:00
 ---
 
