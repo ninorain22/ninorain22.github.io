@@ -28,6 +28,20 @@
   <link rel="alternate" type="application/rss+xml" title="Nino Dong" href="http://localhost:4000/feed.xml">
   
   <meta name="google-site-verification" content="1-1ZlHoRvM0T2FqPbW2S-qLgYXN6rsn52kErlMPd_gw" />
+
+  <style>
+    table{
+      border-left:1px solid #000000;border-top:1px solid #000000;
+      width: 100%;
+      word-wrap:break-word; word-break:break-all;
+    }
+    table th{
+      text-align:center;
+    }
+    table th,td{
+      border-right:1px solid #000000;border-bottom:1px solid #000000;
+    }
+  </style>
   
 </head>
 
@@ -124,8 +138,8 @@
   <ol class="post-list">
     
     <li>
-      <h2 class="post-list__post-title post-title"><a href="/2017/04/Mysql%E9%94%81/" title="访问 Mysql锁">Mysql锁</a></h2>
-      <p class="excerpt">Here is mysql&hellip;</p>
+      <h2 class="post-list__post-title post-title"><a href="/2017/04/Mysql%E9%94%81/" title="访问 Mysql锁问题">Mysql锁问题</a></h2>
+      <p class="excerpt">Mysql锁概述  表级锁  行级锁  页面锁MyISAM锁问题MyISAM只支持表锁查询表级锁争用情况show status like 'table%';如果Table_locks_waited较高，说明表级锁争用严重Mysql表级锁有两种模式  表共享读锁对MyISAM表的读操作，不会阻塞其他用户对同一表的读请求，但会阻塞对同一表的写请求  表独占写锁对MyISAM表的写操作，则会阻塞其他用户对同一表的读和写操作并发插入MyISAM有一个系统变量concurrent_insert:  ...&hellip;</p>
       <div class="post-list__meta"><time datetime="2017-04-14 11:00:00 +0800" class="post-list__meta--date date">2017-04-14</time> &#8226; <span class="post-list__meta--tags tags"></span><a class="btn-border-small" href=/2017/04/Mysql%E9%94%81/>继续阅读</a></div>
       <hr class="post-list__divider" />
     </li>
