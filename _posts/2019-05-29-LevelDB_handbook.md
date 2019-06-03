@@ -521,4 +521,106 @@ leveldb每一条数据项都有一个版本信息，major compaction过程会对
 
 
 ### Compaction过程
+compaction分2类：
++ minor compaction
++ major compaction
 
+#### Minor Compaction
+将一个内存数据库中数据持久化到一个磁盘文件中。
+每次minor compaction之后，都会生成一个新的sstable文件，这也意味着leveldb的版本状态发生了变化，会进行一个版本的更替。
+
+minor compaction的时效性要求很高，要求尽可能快的完成，否则会阻塞正常的写入。因此优先级高于major compaction
+
+
+#### Major Compaction
+Major compaction的过程比较复杂。
+
+![avatar](/assets/images/leveldb_major_compaction过程.jpeg)
+
+##### 条件
+触发leveldb进行major compaction的条件：
++ 当0层文件超过预定的上限（默认4个）
++ 当level i层的文件总大小超过(10^i)MB
++ 当某个文件无效读取的次数过多：以上2个机制可以保证随着合并的进行，数据是严格下沉的，但是仍然存在问题：
+假设0层文件合并完成后，1层文件同时达到上限，也需要合并，最坏可能0~n层都需要合并。
+其中一种优化机制是：
++ source层的文件个数只有1个
++ source层文件与source+1层文件没有重叠
++ source层文件与source+2层的文件重叠部分不超过10个文件
+满足这几个条件时，可以将source层文件直接移到source+1层。
+
+为了避免存在的巨大合并开销，leveldb还引入了第三个机制：错峰合并
++ 一个文件的一次查询开销为10ms，若某个文件查询次数过多，且查询在该文件中不命中，那么就可以视为无效的查询开销，这种文件就可以错峰合并
++ 对于1个1mb的文件，对其合并的开销为25ms，因此当一个1MB的文件无效查询超过25次，便可以对其合并
+
+
+##### 采样探测
+每个sstable文件元数据中，还有一个额外字段seekLeft, 默认为文件的大小/16KB。
+leveldb在正常的数据访问时，会顺带进行采样探测，记录本次访问的第一个sstable文件，若命中，不做任何处理，若不命中，对seekLeft减一
+
+直到一个文件的seekLeft减少为0，会触发对该文件的错峰合并
+
+##### 过程
+整个compaction可以简单的分为以下几步：
+1. 寻找合适的输入文件
+2. 根据key重叠情况扩大输入文件集合
+3. 多路合并
+4. 积分计算
+
+
+## 版本控制
+leveldb每次生成sstable文件，或者删除sstable文件，都会从一个版本升级成另一个版本。
+
+### Manifest
+manifest文件专用于记录版本信息，采用了增量式的存储方式，记录每一个版本相较于上一个版本的变化
+
+一个manifest文件中，包含多条Session Record, 一个Session Record记录了上一个版本至该版本的变化情况，主要包括：
+1. 新增了哪些sstable文件
+2. 删除了哪些sstable文件（由于compaction导致)
+3. 最新的日志文件标号等
+
+借助这个manifest文件，leveldb启动时，可以根据一个初始的版本状态，不断的应用这些版本改动，恢复到最近一次使用的状态、
+
+一个Manifest文件格式如下：
+![avatar](/assets/images/leveldb_manifest文件格式.jpeg)
+
+一个Manifest文件中包含若干条Session Record, 其中第一条Session Record记载了当时leveldb的全量版本信息。其余Session Record记录每次更迭的变化情况
+
+一个Session Record可能包含以下字段：
++ Comparer名称
++ 最新的日志文件编号
++ 下一个可用的文件编号
++ 数据库已经持久化数据项的最大sequence number
++ 新增的文件信息
++ 删除的文件信息
++ compaction记录信息
+
+### Commit
+一次版本升级过程如下：
+![avatar](/assets/images/leveldb_版本升级过程.jpeg)
+
+1. 新建一个session record, 记录状态变更信息
+2. 如果本次版本更新是由于minor compaction或者日志replay导致生成了一个sstable文件，
+则在session record中记录新增的文件信息、最新的日志编号、数据库sequence number以及下一个可用的文件编号
+3. 如果本次版本更新是由于major compaction, 则在session record中记录新增、删除的文件信息，以及下一个可用的文件编号
+4. 利用当前版本信息和session record信息，创建一个全新版本信息，新的版本信息更改的内容为：1)每一层的文件信息 2）每一层积分信息
+5. 将session record持久化
+6. 若这是数据库启动后第一条session record, 则新建一个manifest文件，将完整的版本信息全局记录进session record， 同时更改current文件，
+将其指向新建的manifest
+7. 若数据库中已经创建了manifest文件，则将该条session record进行序列化后直接作为一条记录写入即可
+8. 将当前的版本设置为刚创建的版本
+
+### Recover
+数据库每次启动时，都会有一个recover过程，就是利用manifest信息重新构建一个最新的version
+
+### Current
+每次启动，都会新建一个manifest文件，leveldb中会存在多个manifest文件，因此需要一个current文件来指示当前系统使用的是哪个manifest文件
+
+### 异常处理
+manifest文件丢失, leveldb提供`Recover`接口进行版本信息恢复，
+
+### 多版本并发控制
+1. sstable文件时只读的，每次compaction都只是对若干个sstable进行多路合并后创建新的文件，故不会影响在某个sstable文件读操作的正确性
+2. sstable都是具有版本信息的，即每次compaction完成之后，都会生新版本的sstable， 因此可以保障读写操作都可以针对于相应版本文件机进行，解决了读写冲突
+3. compaction生成的文件只有等合并完成之后才会写入数据库元数据，不会污染用户正常的读操作
+4. 采用引用计数来控制删除行为，当compaction完成后试图去删除某个sstable文件时，会根据该文件的引用计数来适当的延迟删除
