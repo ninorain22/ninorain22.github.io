@@ -103,7 +103,7 @@ type version struct {
  ![avatar](/assets/images/leveldb_写操作整体流程.jpeg)
  
  leveldb的一次写入分为2部分
- 1. 将写操作写入日志
+ 1. 将写操作写入日志, 保障用户的写入不会丢失
  2. 将写操作应用到内存数据库中
  
  #### 写类型
@@ -115,15 +115,17 @@ type version struct {
  无论是Put，Delete还是批量操作，底层都会为这些操作创建一个batch实例作为一个数据库操作的最小执行单元，batch结构如下：
  ![avatar](/assets/images/leveldb_batch结构.jpeg)
  
- 在batch中，每一条数据集都按照上图格式编码，编码后的第一位是操作类型(更新or删除),然后是key的长度，key的内容，value的长度，value的内容
+ 在batch中，每一条数据集都按照上图格式编码，编码后的第一位是操作类型(更新or删除),然后是key的长度，key的内容，value的长度，value的内容。
+ 
+ batch中会维护一个size值，用于表示其包含的数据量的大小。为所有数据项key与value长度的累加，以及每条数据项额外的8个字节，这8个字节用于存储一条数据项额外的信息。
  
  #### key值编码
  数据项从batch中写入到内存数据库中时，都需要一个key的转换，所有的数据项的key都是进过特殊编码的，这种格式称为internalKey.
  
- internalKey在用户key基础上，尾部追加8字节，用于存储：1.操作对应的sequence number, 2.操作类型
+ internalKey在用户key基础上，尾部追加8字节，用于存储：1.操作对应的sequence number(7字节), 2.操作类型(1字节)
  
  其中，每一个操作都被赋予一个sequence number, leveldb每执行一次操作就会给这个number累加一次。
- 又由于leveldb中，一个更新或者删除，并非直接更新元数据，
+ 又由于leveldb中，一个更新或者删除，并非直接更新元数据，而是采取append的方式。
  因此，对应一个key，会有多个版本的数据记录，而最大sequence number的记录就是最新的
  
  此外，leveldb的snapshot也是基于这个sequence number实现，即每一个sequence number代表着数据库的一个版本
@@ -132,16 +134,17 @@ type version struct {
  leveldb面对并发写入时，leveldb在同一个时刻，只允许一个写入操作将内容写入到日志以及内存数据库中，而在写入进程较多时，
  为了减少日志文件的小写入，leveldb会将一些小写入合并成一个大写入。流程如下：
  1. 第一个获取到写锁的写操作
-    + 如果当前写操作的数据量未超过合并上线，而且有其他写操作被pending，将其他写操作的内容合并到自身
-    + 如果当前写操作数据流量超过上线，或者无其他pending的写操作，将所有内容统一写入日志文件，并写入到内存数据库中
+    + 如果当前写操作的数据量未超过合并上限，而且有其他写操作被pending，将其他写操作的内容合并到自身
+    + 如果当前写操作数据流量超过上限，或者无其他pending的写操作，将所有内容统一写入日志文件，并写入到内存数据库中
     + 通知每一个被合并的写操作最终的写入结果，释放或者移交写锁
     
 2. 其他写操作
     + 等待获取写锁或者被合并
-    + 如果被合并了，判断是否合并成功，若成功，等待最终写入结果；否则，直接从上个占有锁的写操作中接过写操作进行写入
+    + 如果被合并了，判断是否合并成功，若成功，等待最终写入结果；否则，直接从上个占有锁的写操作中接过写锁进行写入
     + 若未被合并，继续等待
  
 #### 原子性
+leveldb的任意一个写操作，无论包含了多少次写，其原子性都是由日志文件实现的。
 一个写操作中的所有内容会以一个日志中的一条记录作为最小单位写入，以此来保证原子性
 
 
@@ -154,7 +157,13 @@ leveldb提供2种进行读取数据的接口：
 
 #### 快照
 leveldb中，用于一个整型数来代表一个数据库的状态。
-用户对同一个key的若干次修改，是以维护多条数据项的方式进行存储的，直到compaction时才会合并成一条记录，每条数据项都会赋予一个序列号，序列号越大，数据越新
+用户对同一个key的若干次修改，是以维护多条数据项的方式进行存储的，直到compaction时才会合并成一条记录，每条数据项都会赋予一个序列号，序列号越大，数据越新。
+
+因此，每一个序列号，其实就代表着leveldb的一个状态。
+
+当用户主动或者被动创建一个快照时，leveldb会以当前最新的序列号对其赋值。
+
+在获取到一个快照之后，leveldb会为本次查询的key构建一个internalKey，其中的seq字段就是快照对应的seq，通过这种方式过滤掉所有seq大于快照号的数据项。
 
 #### 读取
  ![avatar](/assets/images/leveldb_读取流程.jpeg)
@@ -165,8 +174,8 @@ leveldb读取分为3步：
 3. 按底层(0层)至高层的顺序在level i层的sstable文件中查找指定的key, 若找不到，返回不存在指定数据
  
 在每一层sstable中查找时，都是按序依次查找sstable的；
-0层文件比较特殊，key可能重合，因此，文件编号大的sstable优先查找；
-非0层，一层的key不会重合，借助sstable元数据的最大最小key，可以快速定位
+0层文件比较特殊，key可能重合，因此在0层中，文件编号大的sstable优先查找，因为编号较大的总是最新的数据。
+非0层，一层中的key不会重合，可以借助sstable元数据的最大最小key，可以快速定位，每一层只需要查找一个sstable文件的内容
  
  
 ## 日志
@@ -178,6 +187,10 @@ leveldb读取分为3步：
 
 ![avatar](/assets/images/leveldb_日志结构.jpeg)
 
+在leveldb中，有2个memory db，以及对应的2份日志文件，其中一个memory db是可读写的，当这个db的数据量超过预定上限时，转换成一个不可写的memory db, 
+同时，与之对应的日志文件变成一份frozen log。新生成的immutable memory db由后台的minor compaction进程将其转换成一个sstable文件进行持久化，
+持久化完成后，对应的frozen log被删除。
+
 为了增加读取效率，日志按照block划分，每个block大小32kb，每个block包含若干个完整的chunk。
 一条日志记录包含一个或多个chunk，每个chunk包含：
 1. 7字节大小的header，前4字节是校验码，接着2字节的长度，接着1字节的chunk类型
@@ -186,25 +199,36 @@ leveldb读取分为3步：
 其中chunk类型：full、first、middle、last。
 
 ### 日志内容
-日志的内容为写入的batch编码后的信息
+日志的内容(即上面结构中的data数据)为**写入的batch编码后的信息**，格式如下：
+
 ![avatar](/assets/images/leveldb_日志内容格式.jpeg)
 
 一条日志记录包含：
 1. Header
     + 当前db的sequence number
     + 本次日志记录中包含的put/del操作的个数
-2. Data
+2. batch data
 
 ### 日志写
 ![avatar](/assets/images/leveldb_日志写流程.jpeg)
 
+在leveldb内部，实现了一个journal的writer，首先调用Next函数获取一个singleWriter，这个singleWriter的作用就是写一条journal记录。
+
+singleWriter开始写入时，标志着第一个chunk开始写入，在写入过程中，不断判断writer中buffer的大小，如果超过32KB，将chunk开始到现在做为一个完整的chunk，
+并为其计算header之后，将整个block写入文件，充值buffer，开始新的chunk写入。
+
+如果一条journal较大，可能会分成几个chunk存储在若干个block中。
+
 ### 日志读
 ![avatar](/assets/images/leveldb_日志读流程.jpeg)
-按block(32KB)读取, 避免频繁IO读取
 
+按block(32KB)读取, 避免频繁IO读取。
+
+每次读取一条日志，reader调用Next返回一个singleReader, 每次调用Read函数就返回一个chunk的数据，每次读取一个chunk，检查校验码、数据类型、长度是否正确，
+若错误，丢弃整个chunk数据。循环直到堵到一个last的chunk，表示整条日志都已经读取完成，返回。
 
 ## 内存数据库
-leveldb的内存数据库底层采用跳跃表实现。
+leveldb的内存数据库用来维护**有序**的key-value对。底层采用跳跃表实现。
 
 ### 跳跃表
 
@@ -215,6 +239,7 @@ leveldb的内存数据库底层采用跳跃表实现。
 平衡树(红黑树为代表)是一种非常复杂的数据结构，为了维持平衡，每次插入都可能会涉及到复杂的节点旋转等操作。
 
 ### 内存数据库
+介绍leveldb是如何利用跳表来构建一个高效内存数据库。
 
 #### 键值编码
 内存数据库中，key称为internalKey, 由3部分组成：
@@ -223,7 +248,7 @@ leveldb的内存数据库底层采用跳跃表实现。
 3. 类型，更新or删除
 
 #### 键值比较
-系统默认比较：字典序比较；按照用户key升序排列，若用户key一致，按照序列号降序排列
+系统默认比较：字典序比较用户定义的key；按照用户key升序排列，若用户key一致，按照序列号降序排列。
 也可以用户自定义
 
 #### 数组组织
@@ -249,7 +274,8 @@ type DB struct {
 }
 ```
 kvData用来存储每一条数据项的key-value数据；
-nodeData用来存储每个跳跃表节点的链接信息
+nodeData用来存储每个跳跃表节点的链接信息。
+
 
 
 ## sstable
@@ -273,10 +299,10 @@ leveldb设计Minor Compaction的目的是为了：
 2. CRC校验码
 
 #### 逻辑结构
-leveldb在逻辑上将sstable划分为：
-1. data block: 用来存储key value对
-2. filter block：用来存储一些过滤器相关的数据，若是用户不指定使用过滤器，该block不会存储任何内容
-3. meta index block: 用来存储filter block的索引信息（即在该sstable文件的偏移量以及数据长度)
+leveldb在逻辑上根据功能的不同，将sstable划分为：
+1. data block: 用来存储key-value对, n个
+2. filter block：用来存储一些过滤器相关的数据(bloom filter)，若是用户不指定使用过滤器，该block不会存储任何内容
+3. meta index block: 用来存储filter block的索引信息（即filter block在该sstable文件的偏移量以及数据长度)
 4. index block: 存储每个data block的索引信息
 5. footer: 用来存储meta index block以及index block的索引信息
 
@@ -286,9 +312,15 @@ data block存储的是key-value键值对，其中一个data block中的数据部
 ![avatar](/assets/images/leveldb_datablock结构.jpeg)
 
 第一部分用来存储key-value数据，由于sstable中所有key-value都是严格按序存储，为了节省存储空间，并不会为每一对key-value键值对存储完整的key信息，
-而是存储与上一个key非共享的部分，避免key重复内容的存储
+**而是存储与上一个key非共享的部分**，避免key重复内容的存储
 
 每间隔若干个key-value对（默认16个），将为该条记录重新存储一个完整的key，重复该过程，每个重新存储完整key的点称为restart point
+
+```
+设计restart point的目的是在读取sstable时，加速查找的过程。
+由于每个restart point存储的都是完整的key值，因此可以先利用restart point进行键值比较，快速定位目标数据所在区域；
+当确定所在区域时，再依次对区间内数据逐项比较key
+```
 
 每个entry数据项的个数如下：
 + 与前一条记录key共享部分的长度
@@ -303,6 +335,8 @@ data block存储的是key-value键值对，其中一个data block中的数据部
 为了加快sstable中数据查询的效率，在直接查询data block中的内容之前，
 先根据filter block中的过滤器判断指定的data block中是否有需要查询的数据，如果不存在，则无需对这个data block进行查找
 
+filter block存储的是data block数据的一些过滤信息，这些过滤信息一般指代布隆过滤器的数据。
+
 ![avatar](/assets/images/leveldb_filterblock结构.jpeg)
 
 这个过滤数据一般指代布隆过滤器的数据，主要分为2部分：
@@ -312,8 +346,12 @@ data block存储的是key-value键值对，其中一个data block中的数据部
 `filter i offset`表示第i个filter data在整个filter block中的偏移量；
 `filter offset's offset`表示filter block索引数据在filter block中的偏移量
 
+在读取filter block中内容时，可以先读取`filter offset's offset`，然后依次读取`filter i offset`, 根据这些offset可以分别读出`filter data`
+
+Base Lg(1 byte)：默认为11，表示每2kb的数据，创建一个新的过滤器来存放过滤数据。
+
 一个sstable只有一个filter block，存储了所有block的filter数据。
-`filter data k`包含了所有起始位置处于`[base*k, base*(k+1)]`范围内的block的key的集合的filter数据，
+具体来说， `filter data k`包含了所有起始位置处于`[base*k, base*(k+1)]`范围内的block的key的集合的filter数据。
 
 ### meta index block结构
 用来存储filter block在整个sstable中的索引，
@@ -322,10 +360,12 @@ key: "filter" + 过滤器名字组成的常量字符串
 value: filter block在sstable中索引信息序列化后的内容：1.在sstable中的偏移量 2.长度
 
 ### index block结构
-用于存储所有data block的索引信息。一条索引信息包含
-1. data block i的最大key值
-2. data block i起始地址在sstable中的偏移量
-3. data block i的大小
+用于存储所有data block的索引信息。每一条索引信息代表一个data block的索引信息，包括：
+1. `data block i`的最大key值
+2. `data block i`起始地址在sstable中的偏移量
+3. `data block i`的大小
+
+其中，`data block i`的最大key值还是index block中该条记录的key值，可以依次比较index block记录的key值来快速定位在哪个data block中。
 
 ### footer结构
 固定48字节，存储meta index block和index block在sstable中的索引信息。
@@ -336,8 +376,8 @@ value: filter block在sstable中索引信息序列化后的内容：1.在sstable
 
 #### 写操作
 sstable的写操作通常发生在：
-+ memory db将内容持久化到磁盘中时，会创建一个sstable进行写入
-+ leveldb后台进行文件compaction时，会将若干个sstable文件的内容重新租住，输出到若干个新的sstable中
++ memory db将内容持久化到磁盘中时，会创建一个sstable进行写入 minor compaction
++ leveldb后台进行文件compaction时，会将若干个sstable文件的内容重新组织，输出到若干个新的sstable中 major compaction
 
 ```go
 type tWriter struct {
@@ -351,7 +391,7 @@ type tWriter struct {
 }
 ```
 一次sstable写入为：一次不断利用迭代器读取需要写入的数据，不断调用tableWriter的`Append`函数，直到所有有效数据读取完毕，
-为sstable文件附上元数据
+然后为sstable文件附上元数据
 
 其中sstable文件的元数据包括：
 1. 文件编码
@@ -359,14 +399,16 @@ type tWriter struct {
 3. 最大key值
 4. 最小key值
 
+Append函数是理解整个sstable写入过程的关键
+
 ```go
 type Writer struct {
     writer io.Writer
     blockSize int // 默认4KB
     
-    dataBlock blockWriter
-    indexBlock blockWriter
-    filterBlock filterWriter
+    dataBlock blockWriter       // data块writer
+    indexBlock blockWriter      // indexBlock块writer
+    filterBlock filterWriter    // filter块writer
     pendingBH blockHandle
     offset uint64
     nEntries int // key-value键值对个数
@@ -378,7 +420,7 @@ type Writer struct {
 1. 若本次写入为新dataBlock的第一次写入，则将上一个dataBlock的索引信息(pendingBH)写入
 2. 将key-value数据写入data block
 3. 将过滤信息写入filter block
-4. 若data block中的数据超过预定上限，标志本次写入结束，将内容刷新到磁盘文件中
+4. 若data block中的数据超过预定上限(默认4kb)，标志本次写入结束，将内容刷新到磁盘文件中
 
 若一个data block中的数据超过了固定上限，需要将相关数据写入到磁盘：
 1. 封装dataBlock, 记录restart point的个数
@@ -395,7 +437,8 @@ type Writer struct {
 4. 写入indexBlock数据
 5. 写入footer数据
 
-至此，所有的数据已经被写入一个sstable中了，在写入后，还会进行更复杂的版本更新
+至此，所有的数据已经被写入一个sstable中了，由于一个sstable是作为一个memory db或者compaction的结果原子性落地的，
+因此在写入后，还会进行更复杂的版本更新
 
 
 #### 读操作
@@ -416,25 +459,34 @@ leveldb中，使用cache来缓存2类数据
 1. sstable文件句柄及其元数据
 2. data block中的数据
 
+在打开文件前，首先判断能否在cache中命中sstable的文件句柄，避免重复读取的开销。
+
+##### 元数据读取
+在打开sstable文件后，需要读取必要的元数据，才能访问sstable中的数据。
+1. 读取文件的最后48字节，即footer数据
+2. 读取footer维护的meta index block, index block两个部分的索引信息
+3. 利用meta index block索引信息读取该部分内容
+4. 遍历meta index block，查看是否存在有用的filter block索引信息
+
 ##### 数据项快速定位
 sstable中存在多个data block, 依次遍历是不可取的，可以利用有序性已经在index block中维护的索引信息快速定位目标数据项可能存在的data block
 
-index block每一项都是一个键值对，每个键值对表示一个data block的索引信息，key为该data block中数据项最大的key，
-value为该data block的索引信息(偏移量、长度)
+index block每一项都是一个键值对，每个键值对表示一个data block的索引信息，**key为该data block中数据项最大的key**。
+**value为该data block的索引信息(偏移量、长度)**
 
 因此，仅需依次比较index block中这些索引即可。
 
+```
 和data block一样，index block中的索引信息也采用了key值截取，即第二个索引信息的key并不是存储完整的key，而是与前一个key不共享的部分。
 区别在于data block的划分粒度默认是16，而index block是2；
 因此，index block中连续2条索引信息会被认为是一个最小的比较单元，这就会导致最终目标数据项的范围区间是某**2个**data block
+```
 
 ##### 过滤data block
 若sstable存有每一个data block的过滤数据，可以利用这些过滤数据对data block数据进行判定，确定目标数据是否不存在与data block中
 
 ##### 查找data block
-data block中所有数据项都是按序排序的，data block以16条记录为一个查找单元，若entry1的key小于目标key，则下一个比较的就是entry17
-
-这样极大的提升了整体的查询效率
+data block中所有数据项都是按序排序的，data block以16条记录为一个查找单元，若entry1的key小于目标key，则下一个比较的就是entry17。这样极大的提升了整体的查询效率
 
 
 ### 文件特点
@@ -446,8 +498,11 @@ sstable为compaction结果原子性产生，在其余时间都是只读的
 一个sstable, 其辅助数据
 + 索引数据
 + 过滤数据
-都位于同一个文件中，需要辅助数据时，无需额外的磁盘读取。需要删除时，无需额外的删除辅助数据
+都直接位于同一个文件中，当需要辅助数据时，无需额外的磁盘读取。需要删除时，无需额外的删除辅助数据
 
+#### 并发访问友好性
+由于sstable文件只读。不存在读写冲突。
+leveldb采用引用计数维护每个文件的引用情况，当一个文件计数值大于0时，对文件的删除动作为等到文件被释放时才进行。
 
 ## 缓存系统
 leveldb使用了一种基于LRU的缓存机制，用于缓存：
@@ -489,11 +544,16 @@ type lruNode struct {
 }
 ```
 
+#### 缓存数据
+leveldb利用上述的cache结构来缓存数据，其中：
+1. cache: 来缓存已经被打开的sstable文件句柄以及元数据(默认上限500）
+2. bcache: 来缓存被读过的sstable中的dataBlock数据(默认上限8MB)
+
 ## 布隆过滤器
 略
 
 ## compaction
-是leveldb最复杂的过程之一，也是leveldb的性能瓶颈之一。本质是一种内部数据重新整合机制，同样也是一种平衡读写速率的有效手段
+是leveldb最复杂的过程之一，**也是leveldb的性能瓶颈之一**。本质是一种内部数据重新整合机制，同样也是一种平衡读写速率的有效手段
 
 ### Compaction的作用
 
@@ -514,11 +574,10 @@ type lruNode struct {
 一次major compaction的过程涉及到大量的磁盘读写开销，是一个严重的性能瓶颈。
 当用户写入速度始终大于major compaction速度时，将导致0层文件不断增加，读取效率不断下降。因此，leveldb规定：
 + 当0层文件超过`SlowdownTrigger`时，写入的速度减慢
-+ 当0层文件超过`PauseTrigger时，写入暂停，直至Major Compaction完成
++ 当0层文件超过`PauseTrigger`时，写入暂停，直至Major Compaction完成
 
 #### 整理数据
 leveldb每一条数据项都有一个版本信息，major compaction过程会对不同版本的数据项合并
-
 
 ### Compaction过程
 compaction分2类：
@@ -540,9 +599,11 @@ Major compaction的过程比较复杂。
 ##### 条件
 触发leveldb进行major compaction的条件：
 + 当0层文件超过预定的上限（默认4个）
-+ 当level i层的文件总大小超过(10^i)MB
++ 当level i层的文件总大小超过(10^i)MB, 降低compaction的IO开销
+//todo @019-06-25
 + 当某个文件无效读取的次数过多：以上2个机制可以保证随着合并的进行，数据是严格下沉的，但是仍然存在问题：
 假设0层文件合并完成后，1层文件同时达到上限，也需要合并，最坏可能0~n层都需要合并。
+
 其中一种优化机制是：
 + source层的文件个数只有1个
 + source层文件与source+1层文件没有重叠
@@ -621,6 +682,8 @@ manifest文件丢失, leveldb提供`Recover`接口进行版本信息恢复，
 
 ### 多版本并发控制
 1. sstable文件时只读的，每次compaction都只是对若干个sstable进行多路合并后创建新的文件，故不会影响在某个sstable文件读操作的正确性
-2. sstable都是具有版本信息的，即每次compaction完成之后，都会生新版本的sstable， 因此可以保障读写操作都可以针对于相应版本文件机进行，解决了读写冲突
+2. sstable都是具有版本信息的，即每次compaction完成之后，都会生新版本的sstable， 因此可以保障读写操作都可以针对于相应版本文件进行，解决了读写冲突
 3. compaction生成的文件只有等合并完成之后才会写入数据库元数据，不会污染用户正常的读操作
 4. 采用引用计数来控制删除行为，当compaction完成后试图去删除某个sstable文件时，会根据该文件的引用计数来适当的延迟删除
+
+
