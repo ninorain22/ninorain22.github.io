@@ -1,5 +1,50 @@
 基础算法相关
 1. 编程题：按树的结构打印数字。 树的基本遍历
+```go
+// 655.输出二叉树
+
+// 思路：先求高度：h
+// 则宽度为2^h-1（满二叉树的节点个数)
+// 依次迭代填充数据, 每次在中间位置填充
+func printTree(root *TreeNode) [][]string {
+	deep := getDeep(root)
+	ret := make([][]string, deep)
+	size := int(math.Pow(2, float64(deep)))-1
+	for i:=0; i<deep; i++ {
+		ret[i] = make([]string, size)
+	}
+
+	var helper func(root *TreeNode, d int, left, right int)
+	helper = func(root *TreeNode, d int, left, right int) {
+		if root == nil {
+			return
+		}
+		// 放在中间
+		mid := (left + right) / 2
+		ret[d][mid] = strconv.Itoa(root.Val)
+		helper(root.Left, d+1, left, mid-1)
+		helper(root.Right, d+1, mid+1, right)
+	}
+
+	helper(root, 0, 0, size-1)
+	return ret
+}
+
+// 获取二叉树高度
+func getDeep(root *TreeNode) int {
+	if root == nil {
+		return 0
+	}
+	leftDeep := getDeep(root.Left)
+	rightDeep := getDeep(root.Right)
+	if leftDeep > rightDeep {
+		return leftDeep + 1
+	}
+	return rightDeep + 1
+}
+
+
+```
 2. 编程题：输入两个16进制数字，打印十六进制之和。
 3. 1，2，5，10四种面值的人民币，输入一个数值输出多少种组合方式  39.组合总和
 ```go
@@ -36,7 +81,7 @@ func combinationSum2(candidates []int, target int) [][]int {
 5. 二叉树相关（层次遍历, 求深度, 求两个节点距离, 翻转二叉树, 前中后序遍历）
     + 层次遍历：BFS
     + 求深度：DFS
-    + 求两个节点的距离：找到最近的公共祖先LCA算法，再计算2个深度-2*(公共祖先的深度)
+    + 求两个节点的距离：找到最近的公共祖先LCA算法，再计算2个深度-2*(公共祖先的深度)；转换为图，然后用BFS，获得距离
     + 翻转二叉树：156.上下翻转二叉树
 ```go
 // 156.翻转二叉树
@@ -64,6 +109,7 @@ func upsideDownBinaryTree(root *TreeNode) *TreeNode {
 }
 
 // 寻找最近公共祖先
+// 2个节点距离 = 2个节点到根节点的距离之和 - 2*(LCA到根节点的距离)
 func findLCA(root *TreeNode, n1, n2 int) *TreeNode {
     if root == nil {
         return root
@@ -82,6 +128,25 @@ func findLCA(root *TreeNode, n1, n2 int) *TreeNode {
         return l
     }
     return r
+}
+
+// 计算节点到根节点的距离
+func findLevel(root *TreeNode, n int) int {
+    if root == nil {
+        return -1
+    }
+    if root.Val == n {
+        return 0
+    }
+    
+    level := findLevel(root.Left, n)
+    if level == -1 {
+        level = findLevel(root.Right, n)
+    }
+    if level != -1 {
+        return level+1
+    }
+    return -1
 }
 ```
 
@@ -123,7 +188,7 @@ func buildTree(inorder []int, postorder []int) *TreeNode {
 		}
 	}
 	root.Left = buildTree(inorder[:loc], postorder[:loc])
-	root.Right = buildTree(inorder[loc+1:], postorder[loc+1:len(inorder)-1])
+	root.Right = buildTree(inorder[loc+1:], postorder[loc:len(inorder)-1])
 	return root
 }
 ```
@@ -167,14 +232,18 @@ func detectCycle2(head *ListNode) *ListNode {
 	slow, fast := head, head
 	for  {
 		if fast == nil || fast.Next == nil {
+		    // 快指针为空，表示一定没有环
 			return nil
 		}
 		slow = slow.Next
 		fast = fast.Next.Next
 		if fast == slow {
+		    // 快慢指针相遇时，退出循环
 			break
 		}
 	}
+	// 将快指针回到起点，然后和慢指针一起后移，每次一步，等到N圈时，两者再次相遇，就是环的起始点
+	// 有相关数学证明，略
 	fast = head
 	for fast != slow {
 		fast = fast.Next
@@ -232,7 +301,7 @@ func heapSort(nums []int)  {
 
 ```
 
-寻找最大N个数字：设置大小为N的最小堆，遍历数据，每次往堆里插入元素，上浮调整。当堆超过大小时，删除堆顶元素。
+寻找最大N个数字：最小堆，遍历数据，每次往堆里插入元素，上浮调整。当堆超过N时，删除堆顶元素。
 这样遍历m条数据，删除堆顶元素m-N次，这样，最后堆顶的元素就是原数据中第N大的
 
 7. 排序（八大排序，各自的时间复杂度. 排序算法的稳定性。快排几乎每次都问）
@@ -275,7 +344,7 @@ func selectSort(nums []int, start, end int)  {
 // 然后，对基准元素的前半部分和后半部分做同样的处理
 // 依次类推，直到各子序列只剩一个元素，即排序完成
 func quickSort(nums []int, start, end int) {
-	if start <= end {
+	if start >= end {
 		return
 	}
 	i, j := start, end
@@ -358,17 +427,17 @@ func mergeSort(nums []int, start, end int) {
 
 func mergeSortInOrder(nums []int, start, middle, end int)  {
 	buf := make([]int, end-start)
-	l, r := start, end
+	l, r := start, mid
 	index := 0
-	for l<middle && r<middle {
+	for l<middle && r<end {
 		if nums[l] <= nums[r] {
 			buf[index] = nums[l]
+			l++
 		} else {
 			buf[index] = nums[r]
+			r++
 		}
 		index++
-		l++
-		r++
 	}
 
 	for l < middle {
@@ -377,7 +446,7 @@ func mergeSortInOrder(nums []int, start, middle, end int)  {
 		index++
 	}
 
-	for r < middle {
+	for r < end {
 		buf[index] = nums[r]
 		r++
 		index++
@@ -423,7 +492,7 @@ func twoSum(nums []int, target int) []int {
 + Kruskal算法:
 1. 把所有边按代价从小到大排序； 
 2. 把n个顶点看成独立的n棵树组成的森林； 
-3. 按权值从小到大选择边，所选的边连接的两个顶点ui,viui,vi,应属于两颗不同的树，则成为最小生成树的一条边，并将这两颗树合并作为一颗树。 
+3. 按权值从小到大选择边，所选的边连接的两个顶点ui,vi应属于两颗不同的树，则成为最小生成树的一条边，并将这两颗树合并作为一颗树。 
 4. 重复(3),直到所有顶点都在一颗树内或者有n-1条边为止。
 
 + Prime算法：算法从某一个顶点s开始
@@ -443,6 +512,8 @@ func twoSum(nums []int, target int) []int {
 ```go
 // 思路1：暴力求解，依次比较，略
 // 思路2：动态规划 dp[i][j]表示以s1[i], s2[j]结尾的公共子串的长度
+// 718. 最长重复子数组
+// dp[i][j] = dp[i-1][j-1] + 1 if s1[i]==s2[j]
 func longestCommonSubString(s1, s2 string) int {
 	size1, size2 := len(s1), len(s2)
 	if size1 == 0 || size2 == 0 {
@@ -452,41 +523,29 @@ func longestCommonSubString(s1, s2 string) int {
 	for i:=0; i<size1; i++ {
 		dp[i] = make([]int, size2)
 	}
-	longest := 1
+	longest := 0
 
 	for i:=0; i<size2; i++ {
 		if s1[0] == s2[i] {
 			dp[0][i] = 1
-		} else {
-			dp[0][i] = 0
 		}
 	}
 
 	for i:=1; i<size1; i++ {
 		if s1[i] == s2[0] {
 			dp[i][0] = 1
-		} else {
-			dp[i][0] = 0
-		}
+		} 
 
 		for j:=1; j<size2; j++ {
 			if s1[i] == s2[j] {
 				dp[i][j] = dp[i-1][j-1] + 1
+				if dp[i][j] > longest {
+				    longest = dp[i][j]
+				}
 			}
 		}
 	}
 
-	// 最大的dp即为最长
-	for i:=0; i<size1; i++ {
-		for j:=0; j<size2; j++ {
-			if dp[i][j] > longest {
-				longest = dp[i][j]
-				start1 := i+1-longest
-				start2 := j+1-longest
-				println(start1, start2)
-			}
-		}
-	}
 	return longest
 }
 ```
@@ -600,12 +659,13 @@ func getCount(nums []int, target int) int {
 + 31. 下一个排列
 ```go
 func nextPermutation(nums []int)  {
-	// 找到最右边的比后一个小的数
+
 	size := len(nums)
 	if size <= 1 {
 		return
 	}
 	dest := -1
+    // 找到最右边的比后一个小的数
 	for i:=0; i<size-1; i++ {
 		if nums[i] < nums[i+1] {
 			dest = i
@@ -618,21 +678,52 @@ func nextPermutation(nums []int)  {
 	}
 
 	// 找到最右边比dest大的数
-	j := dest + 1
-	min := nums[j]
-	for ;j < size && nums[j] <= min && nums[j] > nums[dest]; {
-		min = nums[j]
-		j++
+	j := size-1
+	for j >= dest; j--{
+		if nums[j] > nums[dest] {
+		break
+		}
 	}
-	j--
 
 	nums[dest], nums[j] = nums[j], nums[dest]
 	// 其实应该是直接翻转nums[k+1:]
-	sort.Ints(nums[dest+1:])
+	reverse(nums[dest+1:])
 }
 ```
 20. 给定一个多行字符串，有多列内容，第一列是path路径，第二列是%百分比值，如何统计出指定的path（全匹配或者部分匹配）的第二列百分比的平均值
 21. （1）给一个数字，只允许交换一次，使得交换后的数字比原数字大，并且是所有情况中最小的。（2）01字符串问题。525.连续数组?
+```go
+// 思路3：把0当做-1，也就是一段区间的和为0
+// **若将0当做-1，问题等价于“元素值总和为0的连续数组”**
+// 接着遍历数组 记录当前的前缀和的值 若该前缀和的值已出现过
+// 则说明标记中的下标到当前扫描的下标的这段数组的总和值是为0的
+func findMaxLength(nums []int) int {
+	n := len(nums)
+	if n <= 1 {
+		return 0
+	}
+	m := map[int]int{}
+	m[0] = -1
+	res, s := 0, 0
+	for i:=0; i<n; i++ {
+		if nums[i] == 0 {
+			s += -1
+		} else {
+			s += nums[i]
+		}
+		if j, ok := m[s]; ok {
+			// 再次碰见相同的和，说明中间部分的0和1数量是一样的
+			if i - j > res {
+				res = i - j
+			}
+		} else {
+			m[s] = i
+		}
+	}
+	return res
+}
+```
+
 23. 将一个有序的有重复元素的单链表变成一个有序的无重复元素的单链表。
 ```go
 // 保留重复的1次 快慢指针
@@ -694,3 +785,6 @@ func deleteDuplicates(head *ListNode) *ListNode {
 26. 实现加权轮询的负载均衡策略
 27. 单例模式的实现？手写一个Double Check单例，排序算法？手写一个归并排序
 28. topK问题，K(值. 出现次数)，使用有限的内存？两个十六进制串相加，使用递归？
+topK问题，堆排序，大顶堆 & 小顶堆
+
+
